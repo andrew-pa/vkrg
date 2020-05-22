@@ -1,0 +1,10 @@
+[package]
+name = "vkrg"
+version = "0.1.0"
+authors = ["Andrew Palmer <andrew.pa@outlook.com>"]
+edition = "2018"
+
+[dependencies]
+vulkano = "0.18"
+vulkano-win = "0.18"
+winit = "0.22"
