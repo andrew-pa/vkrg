@@ -1,9 +1,9 @@
-use vulkano::instance::{Instance, InstanceExtensions, PhysicalDevice, QueueFamily };
+use vulkano::instance::{Instance, PhysicalDevice, QueueFamily };
 use vulkano::device::{Device, DeviceExtensions, Features as DeviceFeatures, Queue};
-use vulkano::swapchain::{Swapchain, SurfaceTransform, PresentMode, ColorSpace, FullscreenExclusive, Surface};
-use vulkano::framebuffer::{RenderPassAbstract, FramebufferAbstract, Framebuffer};
-use vulkano::sync::{GpuFuture};
-use vulkano::image::{SwapchainImage};
+use vulkano::swapchain::{Swapchain, SurfaceTransform, PresentMode, FullscreenExclusive, Surface};
+use vulkano::framebuffer::{FramebufferAbstract, Framebuffer};
+use vulkano::sync::GpuFuture;
+use vulkano::image::SwapchainImage;
 use vulkano_win::VkSurfaceBuild;
 use winit::window::{WindowBuilder,Window};
 use winit::event_loop::EventLoop;
@@ -12,6 +12,14 @@ use std::sync::Arc;
 
 mod renderer;
 
+
+/*
+ *  ✓ load some sort of mesh data
+ *  (✓) draw into Gbuffer [position, normal, next bounce dir, material info] - still needs mat info
+ *  - do raytrace on next bounce dir a couple times
+ *  - shade everything
+ */
+
 struct App {
     instance: Arc<Instance>,
     device: Arc<Device>,
@@ -19,7 +27,6 @@ struct App {
     surface: Arc<Surface<Window>>,
     swapchain: Arc<Swapchain<Window>>,
     recreate_swapchain: bool,
-    framebuffers: Vec<Arc<dyn FramebufferAbstract + Send + Sync>>,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
     renderer: renderer::Renderer
 }
@@ -32,6 +39,7 @@ impl App {
 
         let dev_ext = DeviceExtensions {
             khr_swapchain: true,
+            
             .. DeviceExtensions::none()
         };
 
@@ -57,25 +65,14 @@ impl App {
         SurfaceTransform::Identity, alpha, PresentMode::Fifo, FullscreenExclusive::Default, true, color_space)
             .expect("create swapchain");
 
-        let renderer = renderer::Renderer::init(device.clone(), graphics_qu.clone(), swapchain.clone());
-
+        let mut renderer = renderer::Renderer::init(device.clone(), graphics_qu.clone(), swapchain.clone());
+        renderer.window_size_dependent_init(&swapchain_images);
         let mut app = App {
             instance, device: device.clone(), graphics_qu, surface, swapchain,
-            recreate_swapchain: false, framebuffers: Vec::new(),
+            recreate_swapchain: false, 
             previous_frame_end: Some(Box::new(vulkano::sync::now(device.clone()))), renderer
         };
-        app.window_size_dependent_init(&swapchain_images);
         app
-    }
-
-    fn window_size_dependent_init(&mut self, images: &[Arc<SwapchainImage<Window>>]) {
-        self.renderer.window_size_dependent_init();
-        self.framebuffers = images.iter().map(|image| {
-            Arc::new(Framebuffer::start(self.renderer.main_render_pass().clone())
-                                    .add(image.clone()).unwrap()
-                                    .build().expect("create framebuffer")
-                    ) as Arc<dyn FramebufferAbstract + Send + Sync>
-        }).collect::<Vec<_>>();
     }
 
     fn present(&mut self) {
@@ -89,7 +86,7 @@ impl App {
             };
 
             self.swapchain = new_swapchain;
-            self.window_size_dependent_init(&new_images);
+            self.renderer.window_size_dependent_init(&new_images);
             self.recreate_swapchain = false;
         }
 
@@ -105,7 +102,7 @@ impl App {
         if suboptimal { self.recreate_swapchain = true; }
 
         let future = Box::new(self.previous_frame_end.take().unwrap().join(acquire_future));
-        let future = self.renderer.render(future, self.framebuffers[image_num].clone())
+        let future = self.renderer.render(future, image_num)
             .then_swapchain_present(self.graphics_qu.clone(), self.swapchain.clone(), image_num)
             .then_signal_fence_and_flush();
 

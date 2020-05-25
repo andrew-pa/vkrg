@@ -7,4 +7,7 @@ edition = "2018"
 [dependencies]
 vulkano = "0.18"
 vulkano-win = "0.18"
+vulkano-shaders = "0.18"
 winit = "0.22"
+nalgebra-glm = "0.7"
+tobj = "2"
