@@ -19,7 +19,7 @@ struct Vertex {
 }
 
 impl Vertex {
-    fn from_tuple((pos, nor): (&[f32], &[f32])) -> Vertex {
+    fn from_tuple<'a, 'b>((pos, nor): (&'a [f32], &'b [f32])) -> Vertex {
         Vertex {
             position: [pos[0], pos[1], pos[2]],
             normal: [nor[0], nor[1], nor[2]]
@@ -104,7 +104,7 @@ mod shade_fs {
                 vec4 sunor = subpassLoad(normals);
                 if(sunor.w < 1.0) discard;
                 vec3 N = normalize(sunor.rgb);
-                out_color = vec4(vec3(0.1, 0.8, 0.3)*max(0.0, dot(N, vec3(0.0, 1.0, 0.0))) + vec3(0.1), 1.0);
+                out_color = vec4(vec3(0.1, 0.8, 0.3)*max(0.0, dot(N, normalize(vec3(0.4, 1.0, 0.0)))) + vec3(0.1), 1.0);
             }
         "
     }
@@ -178,20 +178,23 @@ impl Renderer {
                 ]
             ).unwrap());
 
-        let (model, mats) = tobj::load_obj(&std::path::Path::new("C:\\Users\\andre\\3D Objects\\dragon.obj"), false).expect("load model");
+        let (model, mats) = tobj::load_obj(&std::path::Path::new("scene.obj"), false).expect("load model");
+        let mut object_vertex_offset = Vec::new();
+        let mut vertices = Vec::with_capacity(model.iter().map(|model| model.mesh.positions.len() / 3).sum());
+        let mut indices: Vec<u32> = Vec::with_capacity(model.iter().map(|model| model.mesh.indices.len()).sum());
+        for obj in model.iter() {
+            let offset = vertices.len();
+            object_vertex_offset.push(offset);
+            let mesh = &obj.mesh;
+            vertices.extend(mesh.positions.chunks(3).zip(mesh.normals.chunks(3)).map(Vertex::from_tuple));
+            indices.extend(mesh.indices.iter().map(|i| i+offset as u32));
+        }
 
         let vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::vertex_buffer(), false, 
-                                model.iter().take(1).map(|model| {
-                                    let mesh = &model.mesh;
-                                    mesh.positions.chunks(3)
-                                        .zip(mesh.normals.chunks(3)).map(Vertex::from_tuple)
-                                }).flatten().collect::<Vec<_>>().iter().cloned()).unwrap();
+                               vertices.iter().cloned()).unwrap();
 
         let index_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::index_buffer(), false, 
-                                model.iter().take(1).map(|model| {
-                                    let mesh = &model.mesh;
-                                    mesh.indices.iter().cloned()
-                                }).flatten().collect::<Vec<_>>().iter().cloned()).unwrap();
+                                indices.iter().cloned()).unwrap();
 
         let fullscreen_triangle_vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::vertex_buffer(), false, [
                                     Vertex2d { position: [ -1.0, -1.0 ] },
@@ -275,7 +278,7 @@ impl Renderer {
         let transform =
             m::rotate_z(
                 &(m::perspective_zo(frame_width/frame_height, PI/4.0, 0.5, 100.0)
-                * m::look_at(&m::vec3(now.cos()*1.5, -1.0, now.sin()*1.5), &m::vec3(0.0, 0.1, 0.0), &m::vec3(0.0, 1.0, 0.0))),
+                * m::look_at(&m::vec3(now.cos()*4.0, -2.0, now.sin()*4.0), &m::vec3(0.0, 0.1, 0.0), &m::vec3(0.0, 1.0, 0.0))),
                 PI);
 
         let clear_values = vec!([1.0, 0.5, 0.2, 1.0].into(), 1f32.into(), [0.0,0.0,0.0,0.0].into(), [0.0,0.0,0.0,0.0].into());
