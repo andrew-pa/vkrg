@@ -7,6 +7,8 @@ use vulkano::sync::GpuFuture;
 use vulkano::buffer::*;
 use vulkano::pipeline::*;
 use vulkano::command_buffer::*;
+use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
+use vulkano::descriptor::DescriptorSet;
 use std::sync::Arc;
 use nalgebra_glm as m;
 
@@ -27,7 +29,13 @@ impl Vertex {
 
 vulkano::impl_vertex!(Vertex, position, normal);
 
-mod vs {
+#[derive(Default, Debug, Clone)]
+struct Vertex2d {
+    position: [f32; 2]
+}
+vulkano::impl_vertex!(Vertex2d, position);
+
+mod obj_vs {
     vulkano_shaders::shader!{
         ty: "vertex",
         src: "
@@ -51,7 +59,20 @@ mod vs {
     }
 }
 
-mod fs {
+mod fs_vs {
+    vulkano_shaders::shader!{
+        ty: "vertex",
+        src: "
+            #version 450
+            layout (location = 0) in vec2 position;
+            void main() {
+                gl_Position = vec4(position, 0.0, 1.0);
+            }
+        "
+    }
+}
+
+mod gbuf_fs {
     vulkano_shaders::shader!{
         ty: "fragment",
         src: "
@@ -62,11 +83,30 @@ mod fs {
             layout(location = 1) out vec4 nor;
 
             void main() {
-                /*color = vec4(vec3(0.1, 0.8, 0.3)*max(0.0, dot(normal, vec3(0.0, 1.0, 0.0))) + vec3(0.1), 1.0);*/
                 pos = vec4(position, 0.0);
-                nor = vec4(normal, 0.0);
+                nor = vec4(normal, 1.0);
             }
             "
+    }
+}
+
+mod shade_fs {
+    vulkano_shaders::shader!{
+        ty: "fragment",
+        src: "
+            #version 450
+            layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput positions;
+            layout(input_attachment_index = 1, set = 0, binding = 1) uniform subpassInput normals;
+
+            layout(location = 0) out vec4 out_color;
+
+            void main() {
+                vec4 sunor = subpassLoad(normals);
+                if(sunor.w < 1.0) discard;
+                vec3 N = normalize(sunor.rgb);
+                out_color = vec4(vec3(0.1, 0.8, 0.3)*max(0.0, dot(N, vec3(0.0, 1.0, 0.0))) + vec3(0.1), 1.0);
+            }
+        "
     }
 }
 
@@ -74,16 +114,21 @@ struct ResDepResources {
     gbuffer_images: Vec<Arc<AttachmentImage>>,
     framebuffers: Vec<Arc<dyn FramebufferAbstract + Send + Sync>>,
     depth_buffer: Arc<AttachmentImage>,
+    shade_desc_set: Arc<dyn DescriptorSet + Send + Sync>,
 }
 
 pub struct Renderer {
     device: Arc<Device>,
     graphics_qu: Arc<Queue>,
+    
     render_pass: Arc<dyn RenderPassAbstract + Send + Sync>,
+    obj_pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
+    shade_pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
 
     vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
     index_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
-    pipeline: Arc<dyn GraphicsPipelineAbstract + Send + Sync>,
+    fullscreen_triangle_vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex2d]>>,
+
     last_time: std::time::Instant,
 
     rdr: Option<ResDepResources>
@@ -148,11 +193,16 @@ impl Renderer {
                                     mesh.indices.iter().cloned()
                                 }).flatten().collect::<Vec<_>>().iter().cloned()).unwrap();
 
+        let fullscreen_triangle_vertex_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::vertex_buffer(), false, [
+                                    Vertex2d { position: [ -1.0, -1.0 ] },
+                                    Vertex2d { position: [ -1.0, 3.0 ] },
+                                    Vertex2d { position: [ 3.0, -1.0 ] },
+                                ].iter().cloned()).unwrap();
 
-        let vsh = vs::Shader::load(device.clone()).unwrap();
-        let fsh = fs::Shader::load(device.clone()).unwrap();
+        let vsh = obj_vs::Shader::load(device.clone()).unwrap();
+        let fsh = gbuf_fs::Shader::load(device.clone()).unwrap();
 
-        let pipeline = Arc::new(GraphicsPipeline::start()
+        let obj_pipeline = Arc::new(GraphicsPipeline::start()
             .vertex_input_single_buffer::<Vertex>()
             .vertex_shader(vsh.main_entry_point(), ())
             .triangle_list()
@@ -162,9 +212,22 @@ impl Renderer {
             .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
             .build(device.clone()).unwrap());
 
+        let fsvs = fs_vs::Shader::load(device.clone()).unwrap();
+        let shfs = shade_fs::Shader::load(device.clone()).unwrap();
+
+        let shade_pipeline = Arc::new(GraphicsPipeline::start()
+            .vertex_input_single_buffer::<Vertex2d>()
+            .vertex_shader(fsvs.main_entry_point(), ())
+            .triangle_list()
+            .viewports_dynamic_scissors_irrelevant(1)
+            .fragment_shader(shfs.main_entry_point(), ())
+            .render_pass(Subpass::from(render_pass.clone(), 1).unwrap())
+            .build(device.clone()).unwrap());
+
         Renderer {
             device, graphics_qu, render_pass,
-            vertex_buffer, index_buffer, pipeline,
+            vertex_buffer, index_buffer, fullscreen_triangle_vertex_buffer,
+            obj_pipeline, shade_pipeline,
             last_time: std::time::Instant::now(),
             rdr: None
         }
@@ -178,8 +241,12 @@ impl Renderer {
             .. ImageUsage::none()
         };
         let gbuf_img: Vec<Arc<AttachmentImage>> =
-            (0..2).map(|i| AttachmentImage::with_usage(self.device.clone(), images[0].dimensions(),
+            (0..2).map(|_| AttachmentImage::with_usage(self.device.clone(), images[0].dimensions(),
                                             Format::R32G32B32A32Sfloat, atch_usage).unwrap()).collect();
+        let shade_desc_set = Arc::new(PersistentDescriptorSet::start(self.shade_pipeline.descriptor_set_layout(0).unwrap().clone())
+            .add_image(gbuf_img[0].clone()).unwrap()
+            .add_image(gbuf_img[1].clone()).unwrap()
+            .build().unwrap());
         self.rdr = Some(ResDepResources{
             framebuffers: images.iter().map(|image| {
                 Arc::new(Framebuffer::start(self.render_pass.clone())
@@ -191,7 +258,8 @@ impl Renderer {
                         ) as Arc<dyn FramebufferAbstract + Send + Sync>
             }).collect::<Vec<_>>(),
             gbuffer_images: gbuf_img,
-            depth_buffer
+            depth_buffer,
+            shade_desc_set
         });
     }
 
@@ -212,7 +280,7 @@ impl Renderer {
 
         let clear_values = vec!([1.0, 0.5, 0.2, 1.0].into(), 1f32.into(), [0.0,0.0,0.0,0.0].into(), [0.0,0.0,0.0,0.0].into());
 
-        let mut dynamic_state = DynamicState {
+        let dynamic_state = DynamicState {
             line_width: None,
             viewports: Some(vec![viewport::Viewport{ 
                 origin: [0.0, 0.0],
@@ -229,10 +297,12 @@ impl Renderer {
         let cmdbuf = AutoCommandBufferBuilder::primary_one_time_submit(self.device.clone(),
                                                     self.graphics_qu.family()).unwrap()
             .begin_render_pass(framebuffer, false, clear_values).unwrap()
-            .draw_indexed(self.pipeline.clone(), &dynamic_state,
+            .draw_indexed(self.obj_pipeline.clone(), &dynamic_state,
                 vec![self.vertex_buffer.clone()], self.index_buffer.clone(),
-                (), (transform)).unwrap()
+                (), transform).unwrap()
             .next_subpass(false).unwrap()
+            .draw(self.shade_pipeline.clone(), &dynamic_state,
+                vec![self.fullscreen_triangle_vertex_buffer.clone()], rdr.shade_desc_set.clone(), ()).unwrap()
             .end_render_pass().unwrap()
             .build().unwrap();
         Box::new(future.then_execute(self.graphics_qu.clone(), cmdbuf).unwrap())
