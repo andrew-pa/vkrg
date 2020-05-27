@@ -11,6 +11,7 @@ use winit::dpi::*;
 use std::sync::Arc;
 
 mod renderer;
+mod shaders;
 
 
 /*
@@ -39,7 +40,7 @@ impl App {
 
         let dev_ext = DeviceExtensions {
             khr_swapchain: true,
-            
+            khr_storage_buffer_storage_class: true,
             .. DeviceExtensions::none()
         };
 
