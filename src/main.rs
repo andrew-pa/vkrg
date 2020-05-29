@@ -51,7 +51,7 @@ impl App {
 
         let surface = WindowBuilder::new()
             .with_title(format!("vkrg on {}", physical_device.name()))
-            .with_inner_size(LogicalSize::new(1280, 960))
+            .with_inner_size(LogicalSize::new(320, 240))
             .build_vk_surface(&evloop, instance.clone())
             .expect("create window");
 

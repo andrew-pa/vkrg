@@ -69,19 +69,21 @@ impl BVHNode {
 #[derive(Default, Debug, Clone)]
 struct Vertex {
     position: [f32; 3],
+    material_index: u32,
     normal: [f32; 3]
 }
 
 impl Vertex {
-    fn from_tuple<'a, 'b>((pos, nor): (&'a [f32], &'b [f32])) -> Vertex {
+    fn from_tuple<'a, 'b>((pos, nor): (&'a [f32], &'b [f32]), material_index: u32) -> Vertex {
         Vertex {
             position: [pos[0], pos[1], pos[2]],
-            normal: [nor[0], nor[1], nor[2]]
+            normal: [nor[0], nor[1], nor[2]],
+            material_index
         }
     }
 }
 
-vulkano::impl_vertex!(Vertex, position, normal);
+vulkano::impl_vertex!(Vertex, position, material_index, normal);
 
 impl Triangle {
     fn new(a: &Vertex, b: &Vertex, c: &Vertex) -> Triangle {
@@ -92,7 +94,7 @@ impl Triangle {
             corner: ap,
             edge1: bp - ap,
             edge2: cp - ap,
-            material_index: 0,
+            material_index: a.material_index,
             node_index: 0,
             _padding: 0xaaaaffff
         }
@@ -104,6 +106,14 @@ struct Vertex2d {
     position: [f32; 2]
 }
 vulkano::impl_vertex!(Vertex2d, position);
+
+#[derive(Clone, Debug)]
+struct Material {
+    diffuse: m::Vec3,
+    _paddinga: [u32; 1],
+    emission: m::Vec3,
+    _paddingb: [u32; 1]
+}
 
 struct ResDepResources {
     gbuffer_images: Vec<Arc<AttachmentImage>>,
@@ -124,6 +134,7 @@ pub struct Renderer {
     index_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
     fullscreen_triangle_vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex2d]>>,
 
+    material_buffer: Arc<CpuAccessibleBuffer<[Material]>>,
     triangle_buffer: Arc<CpuAccessibleBuffer<[Triangle]>>,
     bvh_buffer: Arc<CpuAccessibleBuffer<[BVHNode]>>,
 
@@ -185,9 +196,20 @@ impl Renderer {
             let offset = vertices.len();
             object_vertex_offset.push(offset);
             let mesh = &obj.mesh;
-            vertices.extend(mesh.positions.chunks(3).zip(mesh.normals.chunks(3)).map(Vertex::from_tuple));
+            let mat = mesh.material_id.unwrap_or(0) as u32;
+            // println!("{:#?}", mats[mesh.material_id.unwrap()]);
+            vertices.extend(mesh.positions.chunks(3).zip(mesh.normals.chunks(3)).map(|t| Vertex::from_tuple(t, mat)));
             indices.extend(mesh.indices.iter().map(|i| i+offset as u32));
         }
+
+        let material_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage { storage_buffer: true, ..BufferUsage::none() }, false,
+            mats.iter().map(|mat| Material {
+                diffuse: mat.diffuse.into(),
+                emission: mat.ambient.into(),
+                _paddinga: [0xffffaaaa],
+                _paddingb: [0xffffbbbb]
+            }).inspect(|m| println!("{:?}", m)).collect::<Vec<_>>().iter().cloned()
+        ).unwrap();
 
         let mut triangles: Vec<Triangle> = indices.chunks(3)
             .map(|i| Triangle::new(&vertices[i[0] as usize],
@@ -210,6 +232,7 @@ impl Renderer {
                                 ].iter().cloned()).unwrap();
 
         let triangle_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage { storage_buffer: true, ..BufferUsage::none() }, false, triangles.iter().cloned()).unwrap();
+
         let bvh_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage { storage_buffer: true, ..BufferUsage::none() }, false, bvh_nodes.iter().cloned()).unwrap();
 
         use super::shaders;
@@ -240,7 +263,7 @@ impl Renderer {
         Renderer {
             device, graphics_qu, render_pass,
             vertex_buffer, index_buffer, fullscreen_triangle_vertex_buffer,
-            triangle_buffer, bvh_buffer,
+            triangle_buffer, bvh_buffer, material_buffer,
             obj_pipeline, shade_pipeline,
             last_time: std::time::Instant::now(),
             rdr: None
@@ -262,6 +285,7 @@ impl Renderer {
             .add_image(gbuf_img[1].clone()).unwrap()
             .add_buffer(self.triangle_buffer.clone()).expect("add tri buf")
             .add_buffer(self.bvh_buffer.clone()).expect("add bvh buf")
+            .add_buffer(self.material_buffer.clone()).unwrap()
             .build().expect("build ds"));
         self.rdr = Some(ResDepResources{
             framebuffers: images.iter().map(|image| {
@@ -289,10 +313,10 @@ impl Renderer {
         let (frame_width, frame_height) = (framebuffer.dimensions()[0] as f32, framebuffer.dimensions()[1] as f32);
         use std::f32::consts::PI;
         let transform =
-            m::rotate_z(
+            m::scale(&m::rotate_z(
                 &(m::perspective_zo(frame_width/frame_height, PI/4.0, 0.5, 100.0)
                 * m::look_at(&m::vec3((now*0.1).cos()*4.0, -2.0, (now*0.1).sin()*4.0), &m::vec3(0.0, 0.1, 0.0), &m::vec3(0.0, 1.0, 0.0))),
-                PI);
+                PI), &m::vec3(1.000015f32, 1.000015, 1.000015));
 
         let clear_values = vec!([1.0, 0.5, 0.2, 1.0].into(), 1f32.into(), [0.0,0.0,0.0,0.0].into(), [0.0,0.0,0.0,0.0].into());
 
